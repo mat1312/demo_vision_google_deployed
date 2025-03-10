@@ -27,9 +27,7 @@ def load_credentials_from_env():
     app_dir = os.path.dirname(__file__)
     env_path = os.path.join(app_dir, '.env')
     
-    if not os.path.exists(env_path):
-        st.sidebar.error("⚠️ File .env non trovato nella directory dell'app")
-        return None
+    
     
     # Carica il file .env
     load_dotenv(env_path)
