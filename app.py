@@ -23,9 +23,17 @@ st.set_page_config(
 
 # Funzione per caricare le credenziali dal file .env
 def load_credentials_from_env():
-    # Try Streamlit secrets first (for Streamlit Cloud)
+    """Safely load Google Cloud credentials from Streamlit secrets or environment"""
+    import streamlit as st
+    import os
+    import json
+    import tempfile
+    
+    credentials_dict = {}
+    
+    # First try accessing secrets directly through Streamlit
     try:
-        import streamlit as st
+        # Try dictionary-style access first
         credentials_dict = {
             "type": st.secrets["GOOGLE_TYPE"],
             "project_id": st.secrets["GOOGLE_PROJECT_ID"],
@@ -40,44 +48,62 @@ def load_credentials_from_env():
             "universe_domain": st.secrets.get("GOOGLE_UNIVERSE_DOMAIN", "googleapis.com")
         }
         st.sidebar.success("✅ Credenziali caricate da secrets")
-        
-    except (KeyError, AttributeError):
-        # Fall back to .env for local development
-        app_dir = os.path.dirname(__file__)
-        env_path = os.path.join(app_dir, '.env')
-        load_dotenv(env_path)
-        
-        private_key = os.getenv("GOOGLE_PRIVATE_KEY")
-        credentials_dict = {
-            "type": os.getenv("GOOGLE_TYPE"),
-            "project_id": os.getenv("GOOGLE_PROJECT_ID"),
-            "private_key_id": os.getenv("GOOGLE_PRIVATE_KEY_ID"),
-            "private_key": private_key.replace("\\n", "\n") if private_key else None,
-            "client_email": os.getenv("GOOGLE_CLIENT_EMAIL"),
-            "client_id": os.getenv("GOOGLE_CLIENT_ID"),
-            "auth_uri": os.getenv("GOOGLE_AUTH_URI"),
-            "token_uri": os.getenv("GOOGLE_TOKEN_URI"),
-            "auth_provider_x509_cert_url": os.getenv("GOOGLE_AUTH_PROVIDER_X509_CERT_URL"),
-            "client_x509_cert_url": os.getenv("GOOGLE_CLIENT_X509_CERT_URL"),
-            "universe_domain": os.getenv("GOOGLE_UNIVERSE_DOMAIN", "googleapis.com")
-        }
-        st.sidebar.success("✅ Credenziali caricate dal file .env")
+    except Exception:
+        # If that fails, load from .env or environment variables
+        try:
+            # Try to load from .env file
+            try:
+                from dotenv import load_dotenv
+                app_dir = os.path.dirname(__file__)
+                env_path = os.path.join(app_dir, '.env')
+                load_dotenv(env_path)
+            except Exception:
+                pass  # Continue with environment variables even if .env loading fails
+            
+            # Get values with safe defaults
+            private_key = os.getenv("GOOGLE_PRIVATE_KEY")
+            if private_key:
+                private_key = private_key.replace("\\n", "\n")
+                
+            credentials_dict = {
+                "type": os.getenv("GOOGLE_TYPE", ""),
+                "project_id": os.getenv("GOOGLE_PROJECT_ID", ""),
+                "private_key_id": os.getenv("GOOGLE_PRIVATE_KEY_ID", ""),
+                "private_key": private_key,
+                "client_email": os.getenv("GOOGLE_CLIENT_EMAIL", ""),
+                "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
+                "auth_uri": os.getenv("GOOGLE_AUTH_URI", "https://accounts.google.com/o/oauth2/auth"),
+                "token_uri": os.getenv("GOOGLE_TOKEN_URI", "https://oauth2.googleapis.com/token"),
+                "auth_provider_x509_cert_url": os.getenv("GOOGLE_AUTH_PROVIDER_X509_CERT_URL", 
+                                                          "https://www.googleapis.com/oauth2/v1/certs"),
+                "client_x509_cert_url": os.getenv("GOOGLE_CLIENT_X509_CERT_URL", ""),
+                "universe_domain": os.getenv("GOOGLE_UNIVERSE_DOMAIN", "googleapis.com")
+            }
+            st.sidebar.info("ℹ️ Usando variabili d'ambiente")
+        except Exception as e:
+            st.sidebar.error(f"❌ Errore nel caricamento delle credenziali: {str(e)}")
+            return None
     
-    # Verify that all required keys are present
+    # Verify required keys exist and have values
     required_keys = ["type", "project_id", "private_key_id", "private_key", "client_email"]
     missing_keys = [key for key in required_keys if not credentials_dict.get(key)]
     
     if missing_keys:
-        st.sidebar.error(f"⚠️ Mancano alcune variabili: {', '.join(missing_keys)}")
+        st.sidebar.error(f"⚠️ Credenziali mancanti: {', '.join(missing_keys)}")
+        st.sidebar.info("Aggiungi le credenziali nelle impostazioni Streamlit Cloud > Settings > Secrets")
         return None
     
-    # Create temporary file with credentials
-    with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as temp_file:
-        json.dump(credentials_dict, temp_file)
-        temp_path = temp_file.name
-    
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
-    return temp_path
+    # Create a temporary file with credentials
+    try:
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as temp_file:
+            json.dump(credentials_dict, temp_file)
+            temp_path = temp_file.name
+        
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
+        return temp_path
+    except Exception as e:
+        st.sidebar.error(f"❌ Errore nella creazione del file temporaneo: {str(e)}")
+        return None
 
 # Funzione per verificare la presenza dei file predefiniti
 def check_default_files():
