@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import json
 from PIL import Image
 import shutil
+import tempfile
+from dotenv import load_dotenv
+from google.oauth2 import service_account
 
 # Importa le funzioni dal file principale
 # Assicurati che il file principale si chiami main.py e sia nella stessa directory
@@ -18,16 +21,52 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Funzione per caricare automaticamente le credenziali
-def load_credentials():
-    credentials_path = os.path.join(os.path.dirname(__file__), "credentials.json")
-    if os.path.exists(credentials_path):
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
-        st.sidebar.success("✅ Credenziali caricate automaticamente da credentials.json")
-        return credentials_path
-    else:
-        st.sidebar.error("⚠️ File credentials.json non trovato nella directory dell'app")
+# Funzione per caricare le credenziali dal file .env
+def load_credentials_from_env():
+    # Carica le variabili d'ambiente dal file .env
+    app_dir = os.path.dirname(__file__)
+    env_path = os.path.join(app_dir, '.env')
+    
+    if not os.path.exists(env_path):
+        st.sidebar.error("⚠️ File .env non trovato nella directory dell'app")
         return None
+    
+    # Carica il file .env
+    load_dotenv(env_path)
+    
+    # Crea un dizionario con le credenziali
+    credentials_dict = {
+        "type": os.getenv("GOOGLE_TYPE"),
+        "project_id": os.getenv("GOOGLE_PROJECT_ID"),
+        "private_key_id": os.getenv("GOOGLE_PRIVATE_KEY_ID"),
+        "private_key": os.getenv("GOOGLE_PRIVATE_KEY").replace("\\n", "\n"),
+        "client_email": os.getenv("GOOGLE_CLIENT_EMAIL"),
+        "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+        "auth_uri": os.getenv("GOOGLE_AUTH_URI"),
+        "token_uri": os.getenv("GOOGLE_TOKEN_URI"),
+        "auth_provider_x509_cert_url": os.getenv("GOOGLE_AUTH_PROVIDER_X509_CERT_URL"),
+        "client_x509_cert_url": os.getenv("GOOGLE_CLIENT_X509_CERT_URL"),
+        "universe_domain": os.getenv("GOOGLE_UNIVERSE_DOMAIN", "googleapis.com")
+    }
+    
+    # Verifica che tutte le chiavi obbligatorie siano presenti
+    required_keys = ["type", "project_id", "private_key_id", "private_key", "client_email"]
+    missing_keys = [key for key in required_keys if not credentials_dict.get(key)]
+    
+    if missing_keys:
+        st.sidebar.error(f"⚠️ Mancano alcune variabili d'ambiente: {', '.join(missing_keys)}")
+        return None
+    
+    # Crea un file temporaneo con le credenziali
+    with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as temp_file:
+        json.dump(credentials_dict, temp_file)
+        temp_path = temp_file.name
+    
+    # Imposta la variabile d'ambiente per le API Google Cloud
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
+    st.sidebar.success("✅ Credenziali caricate dal file .env")
+    
+    return temp_path
 
 # Funzione per verificare la presenza dei file predefiniti
 def check_default_files():
@@ -161,6 +200,7 @@ def plot_emotions(emotions):
     
     return fig
 
+# Funzione principale che viene eseguita quando l'app viene avviata
 def main():
     st.title("🎭 Analizzatore di Sentiment e Ironia")
     st.markdown("Analizza il sentiment e rileva l'ironia da testo, immagini e audio utilizzando Google Cloud AI")
@@ -178,8 +218,23 @@ def main():
     I file predefiniti (test.jpg e test.wav) vengono utilizzati automaticamente se presenti nella directory dell'app.
     """)
     
-    # Carica automaticamente le credenziali
-    creds_path = load_credentials()
+    # Carica le credenziali dal file .env
+    creds_path = load_credentials_from_env()
+    
+    # Cleanup delle credenziali quando l'app si chiude
+    if hasattr(st, 'session_state') and 'creds_cleanup' not in st.session_state:
+        st.session_state['creds_cleanup'] = True
+        
+        def cleanup_temp_creds():
+            if creds_path and os.path.exists(creds_path):
+                try:
+                    os.unlink(creds_path)
+                except:
+                    pass
+        
+        # Registro la funzione di cleanup
+        import atexit
+        atexit.register(cleanup_temp_creds)
     
     # Verifica la presenza dei file predefiniti
     default_files = check_default_files()
@@ -208,7 +263,7 @@ def main():
             
             if st.button("Analizza testo", key="analyze_text") and text_input:
                 if not creds_path:
-                    st.error("❌ File credentials.json non trovato. Aggiungi il file nella directory dell'app.")
+                    st.error("❌ File .env non trovato o variabili mancanti. Controlla la configurazione.")
                 else:
                     with st.spinner("Analisi del testo in corso..."):
                         text_results = analyze_text_sentiment(text_input)
@@ -268,7 +323,7 @@ def main():
             # Pulsante per analizzare
             if image_path and st.button("Analizza immagine", key="analyze_image"):
                 if not creds_path:
-                    st.error("❌ File credentials.json non trovato. Aggiungi il file nella directory dell'app.")
+                    st.error("❌ File .env non trovato o variabili mancanti. Controlla la configurazione.")
                 else:
                     with st.spinner("Analisi dell'immagine in corso..."):
                         image_results = analyze_face_expression(image_path)
@@ -345,7 +400,7 @@ def main():
             # Pulsante per analizzare
             if audio_path and st.button("Analizza audio", key="analyze_audio"):
                 if not creds_path:
-                    st.error("❌ File credentials.json non trovato. Aggiungi il file nella directory dell'app.")
+                    st.error("❌ File .env non trovato o variabili mancanti. Controlla la configurazione.")
                 else:
                     with st.spinner("Analisi dell'audio in corso..."):
                         audio_results = transcribe_audio(audio_path, language_code)
@@ -412,7 +467,7 @@ def main():
             
             if st.button("Esegui analisi completa", key="analyze_all"):
                 if not creds_path:
-                    st.error("❌ File credentials.json non trovato. Aggiungi il file nella directory dell'app.")
+                    st.error("❌ File .env non trovato o variabili mancanti. Controlla la configurazione.")
                 else:
                     with st.spinner("Analisi in corso..."):
                         # Analisi del testo
@@ -500,7 +555,7 @@ def main():
     st.markdown("### 📌 Informazioni")
     st.markdown("""
     - Questo strumento utilizza le API di Google Cloud per analizzare sentiment, ironia ed emozioni
-    - Posiziona il file credentials.json nella stessa directory dell'app
+    - Le credenziali vengono caricate automaticamente dal file .env nella stessa directory
     - I file predefiniti test.jpg e test.wav vengono utilizzati se presenti nella directory
     - Per i file audio, vengono analizzati al massimo i primi 45 secondi in formato mono
     - Il rilevamento dell'ironia è basato su euristiche e potrebbe non essere sempre accurato

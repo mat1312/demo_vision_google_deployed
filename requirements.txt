@@ -5,3 +5,4 @@ numpy>=1.19.0
 streamlit>=1.18.0
 matplotlib>=3.4.0
 pillow>=8.0.0
+python-dotenv>=0.20.0
