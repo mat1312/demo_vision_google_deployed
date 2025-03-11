@@ -132,7 +132,7 @@ def transcribe_audio(audio_path, language_code="it-IT"):
             
             print(f"🔊 Elaborazione audio di {file_duration:.1f} secondi (file completo)")
                 
-            # Legge TUTTI i frame dell'audio (senza limitazioni)
+            # Legge TUTTI i frame dell'audio (senza alcuna limitazione)
             wav.setpos(0)
             audio_data = wav.readframes(n_frames)
         
@@ -188,7 +188,7 @@ def transcribe_audio(audio_path, language_code="it-IT"):
             
         audio = speech.RecognitionAudio(content=content)
         
-        # Configura il riconoscimento vocale
+        # Configura il riconoscimento vocale per un file completo
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=frame_rate,
@@ -212,16 +212,21 @@ def transcribe_audio(audio_path, language_code="it-IT"):
                 transcript = " ".join([result.alternatives[0].transcript for result in response.results])
                 confidence = response.results[0].alternatives[0].confidence
                 
+                # Messaggio chiaro che indica l'analisi del file completo
+                note_message = f"{conversion_note}, file completo analizzato ({file_duration:.1f} secondi)"
+                
                 success_result = {
                     "transcript": transcript, 
                     "confidence": confidence, 
-                    "note": f"{conversion_note}, file completo di {file_duration:.1f} secondi analizzato"
+                    "note": note_message
                 }
             else:
+                note_message = f"{conversion_note}, file completo analizzato ({file_duration:.1f} secondi)"
+                
                 success_result = {
                     "transcript": "", 
                     "confidence": 0, 
-                    "note": f"Nessun risultato. {conversion_note}, file completo analizzato"
+                    "note": f"Nessun risultato. {note_message}"
                 }
         except Exception as api_error:
             os.remove(file_to_analyze)
@@ -231,6 +236,16 @@ def transcribe_audio(audio_path, language_code="it-IT"):
         os.remove(file_to_analyze)
         
         return success_result
+            
+    except FileNotFoundError:
+        print(f"❌ File audio non trovato: {audio_path}")
+        return {"error": "File non trovato"}
+    except Exception as e:
+        print(f"❌ Errore nell'analisi audio: {e}")
+        # Assicurati di eliminare il file temporaneo in caso di errore
+        if 'temp_file' in locals() and os.path.exists(temp_file):
+            os.remove(temp_file)
+        return {"error": str(e)}
             
     except FileNotFoundError:
         print(f"❌ File audio non trovato: {audio_path}")
