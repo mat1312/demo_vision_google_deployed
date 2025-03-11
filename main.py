@@ -113,7 +113,7 @@ def analyze_face_expression(image_path):
         return {"error": str(e)}
 
 def transcribe_audio(audio_path, language_code="it-IT"):
-    """Trascrive l'audio e restituisce il testo, supportando file di qualsiasi lunghezza"""
+    """Trascrive l'audio e restituisce il testo, supportando file di qualsiasi lunghezza entro i limiti di dimensione"""
     if audio_path.lower() == 'none':
         print("⏩ Analisi dell'audio saltata")
         return {"error": "Analisi saltata"}
@@ -130,9 +130,9 @@ def transcribe_audio(audio_path, language_code="it-IT"):
             n_frames = wav.getnframes()
             file_duration = n_frames / frame_rate
             
-            print(f"🔊 Elaborazione audio di {file_duration:.1f} secondi (file completo)")
+            print(f"🔊 Elaborazione audio di {file_duration:.1f} secondi")
                 
-            # Legge TUTTI i frame dell'audio (senza alcuna limitazione)
+            # Legge tutti i frame dell'audio
             wav.setpos(0)
             audio_data = wav.readframes(n_frames)
         
@@ -171,49 +171,83 @@ def transcribe_audio(audio_path, language_code="it-IT"):
             file_to_analyze = temp_file
             conversion_note = "Audio in formato mono"
         
-        # Verifica la dimensione del file temporaneo
+        # Verifica la dimensione del file temporaneo - limite API Google è 10MB
         temp_size = os.path.getsize(file_to_analyze)
-        max_size = 100 * 1024 * 1024  # 100MB
+        max_api_size = 10 * 1024 * 1024  # 10MB - limite massimo dell'API di Google
         
-        if temp_size > max_size:
-            os.remove(temp_file)
-            return {"error": f"File troppo grande ({temp_size/1024/1024:.1f}MB). Il limite è 100MB."}
+        if temp_size > max_api_size:
+            # Se il file è troppo grande, dobbiamo campionarlo o ridurne la qualità
+            print(f"⚠️ File troppo grande ({temp_size/1024/1024:.1f}MB). L'API ha un limite di 10MB.")
+            print("🔄 Riduzione della dimensione del file in corso...")
+            
+            # Leggi il file WAV temporaneo
+            with wave.open(file_to_analyze, 'rb') as wav:
+                params = wav.getparams()
+                frames = wav.readframes(wav.getnframes())
+            
+            # Calcoliamo quanti frame possiamo processare per stare sotto i 10MB
+            # Consideriamo un margine di sicurezza del 10%
+            safe_max_size = int(max_api_size * 0.9)  # 90% del limite per sicurezza
+            bytes_per_frame = sample_width
+            max_frames = safe_max_size // bytes_per_frame
+            
+            # Leggiamo solo la porzione iniziale del file
+            reduced_frames = frames[:max_frames * sample_width]
+            
+            # Scriviamo un nuovo file WAV ridotto
+            reduced_file = f"reduced_{os.path.basename(temp_file)}"
+            with wave.open(reduced_file, 'wb') as wav:
+                wav.setparams(params)
+                wav.writeframes(reduced_frames)
+            
+            # Calcoliamo la durata della porzione analizzabile
+            analyzable_duration = max_frames / frame_rate
+            
+            # Aggiorniamo il file da analizzare
+            os.remove(file_to_analyze)
+            file_to_analyze = reduced_file
+            
+            print(f"ℹ️ Analizzerò i primi {analyzable_duration:.1f} secondi dell'audio (limite dimensione API)")
+            size_note = f"primi {analyzable_duration:.1f} secondi analizzati (limite dimensione API)"
+        else:
+            size_note = f"file completo analizzato ({file_duration:.1f} secondi)"
         
-        # Usa l'API Long Running per file audio lunghi
+        # Usa l'API Speech-to-Text
         client = speech.SpeechClient()
         
-        # Carica il file audio temporaneo
         with open(file_to_analyze, 'rb') as audio_file:
             content = audio_file.read()
             
         audio = speech.RecognitionAudio(content=content)
         
-        # Configura il riconoscimento vocale per un file completo
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=frame_rate,
             language_code=language_code,
-            audio_channel_count=1,  # Sempre mono
-            enable_automatic_punctuation=True,  # Attiva punteggiatura automatica
-            enable_separate_recognition_per_channel=False
+            audio_channel_count=1,
+            enable_automatic_punctuation=True,
+            enable_separate_recognition_per_channel=False,
         )
         
         try:
-            print("⏳ Avvio trascrizione dell'intero file audio...")
+            print("⏳ Avvio trascrizione...")
             
-            # Usa ESCLUSIVAMENTE l'API asincrona per supportare file audio lunghi
-            operation = client.long_running_recognize(config=config, audio=audio)
-            
-            print("⏳ Elaborazione in corso, attendere...")
-            response = operation.result(timeout=600)  # Timeout di 10 minuti per file molto lunghi
+            # Determina se usare l'API sincrona o asincrona in base alla durata
+            if file_duration <= 60:  # Per file brevi, usiamo l'API sincrona (più veloce)
+                response = client.recognize(config=config, audio=audio)
+                results = response.results
+            else:  # Per file più lunghi, usiamo l'API asincrona
+                operation = client.long_running_recognize(config=config, audio=audio)
+                print("⏳ Elaborazione in corso, attendere...")
+                response = operation.result(timeout=600)
+                results = response.results
             
             # Elabora i risultati
-            if response.results:
-                transcript = " ".join([result.alternatives[0].transcript for result in response.results])
-                confidence = response.results[0].alternatives[0].confidence
+            if results:
+                transcript = " ".join([result.alternatives[0].transcript for result in results])
+                confidence = results[0].alternatives[0].confidence
                 
-                # Messaggio chiaro che indica l'analisi del file completo
-                note_message = f"{conversion_note}, file completo analizzato ({file_duration:.1f} secondi)"
+                note_message = f"{conversion_note}, {size_note}"
                 
                 success_result = {
                     "transcript": transcript, 
@@ -221,7 +255,7 @@ def transcribe_audio(audio_path, language_code="it-IT"):
                     "note": note_message
                 }
             else:
-                note_message = f"{conversion_note}, file completo analizzato ({file_duration:.1f} secondi)"
+                note_message = f"{conversion_note}, {size_note}"
                 
                 success_result = {
                     "transcript": "", 
@@ -232,10 +266,20 @@ def transcribe_audio(audio_path, language_code="it-IT"):
             os.remove(file_to_analyze)
             return {"error": f"Errore API Speech-to-Text: {str(api_error)}"}
         
-        # Elimina il file temporaneo alla fine
+        # Elimina i file temporanei alla fine
         os.remove(file_to_analyze)
         
         return success_result
+            
+    except FileNotFoundError:
+        print(f"❌ File audio non trovato: {audio_path}")
+        return {"error": "File non trovato"}
+    except Exception as e:
+        print(f"❌ Errore nell'analisi audio: {e}")
+        # Assicurati di eliminare il file temporaneo in caso di errore
+        if 'temp_file' in locals() and os.path.exists(temp_file):
+            os.remove(temp_file)
+        return {"error": str(e)}
             
     except FileNotFoundError:
         print(f"❌ File audio non trovato: {audio_path}")
