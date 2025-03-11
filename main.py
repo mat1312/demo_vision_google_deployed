@@ -113,7 +113,10 @@ def analyze_face_expression(image_path):
         return {"error": str(e)}
 
 def transcribe_audio(audio_path, language_code="it-IT"):
-    """Trascrive l'audio e restituisce il testo, supportando file di qualsiasi lunghezza entro i limiti di dimensione"""
+    """
+    Trascrive l'audio e restituisce il testo, supportando file di qualsiasi lunghezza 
+    utilizzando Google Cloud Storage per file lunghi
+    """
     if audio_path.lower() == 'none':
         print("⏩ Analisi dell'audio saltata")
         return {"error": "Analisi saltata"}
@@ -121,6 +124,9 @@ def transcribe_audio(audio_path, language_code="it-IT"):
     try:
         if not audio_path.lower().endswith(('.wav')):
             return {"error": "Il file deve essere in formato WAV per l'analisi"}
+            
+        # Importa la libreria storage (aggiungila in cima al file se non è già presente)
+        from google.cloud import storage
             
         # Apre il file WAV e legge le proprietà
         with wave.open(audio_path, 'rb') as wav:
@@ -130,9 +136,9 @@ def transcribe_audio(audio_path, language_code="it-IT"):
             n_frames = wav.getnframes()
             file_duration = n_frames / frame_rate
             
-            print(f"🔊 Elaborazione audio di {file_duration:.1f} secondi")
+            print(f"🔊 Elaborazione audio di {file_duration:.1f} secondi (file completo)")
                 
-            # Legge tutti i frame dell'audio
+            # Legge TUTTI i frame dell'audio
             wav.setpos(0)
             audio_data = wav.readframes(n_frames)
         
@@ -171,83 +177,65 @@ def transcribe_audio(audio_path, language_code="it-IT"):
             file_to_analyze = temp_file
             conversion_note = "Audio in formato mono"
         
-        # Verifica la dimensione del file temporaneo - limite API Google è 10MB
-        temp_size = os.path.getsize(file_to_analyze)
-        max_api_size = 10 * 1024 * 1024  # 10MB - limite massimo dell'API di Google
-        
-        if temp_size > max_api_size:
-            # Se il file è troppo grande, dobbiamo campionarlo o ridurne la qualità
-            print(f"⚠️ File troppo grande ({temp_size/1024/1024:.1f}MB). L'API ha un limite di 10MB.")
-            print("🔄 Riduzione della dimensione del file in corso...")
+        # Per file audio lunghi, usiamo Google Cloud Storage
+        if file_duration > 60:  # Per file più lunghi di 1 minuto
+            print("🔄 File audio lungo rilevato, utilizzo Google Cloud Storage...")
             
-            # Leggi il file WAV temporaneo
-            with wave.open(file_to_analyze, 'rb') as wav:
-                params = wav.getparams()
-                frames = wav.readframes(wav.getnframes())
+            # Crea un client Storage
+            storage_client = storage.Client()
             
-            # Calcoliamo quanti frame possiamo processare per stare sotto i 10MB
-            # Consideriamo un margine di sicurezza del 10%
-            safe_max_size = int(max_api_size * 0.9)  # 90% del limite per sicurezza
-            bytes_per_frame = sample_width
-            max_frames = safe_max_size // bytes_per_frame
+            # Genera un nome per il bucket temporaneo o usa uno esistente
+            # Nota: Dovresti avere un bucket già configurato o permessi per crearne uno
+            bucket_name = "audio_analysis_temp"
             
-            # Leggiamo solo la porzione iniziale del file
-            reduced_frames = frames[:max_frames * sample_width]
+            # Verifica se il bucket esiste, altrimenti crealo
+            try:
+                bucket = storage_client.get_bucket(bucket_name)
+            except Exception:
+                print(f"⚠️ Bucket {bucket_name} non trovato, creazione in corso...")
+                bucket = storage_client.create_bucket(bucket_name)
             
-            # Scriviamo un nuovo file WAV ridotto
-            reduced_file = f"reduced_{os.path.basename(temp_file)}"
-            with wave.open(reduced_file, 'wb') as wav:
-                wav.setparams(params)
-                wav.writeframes(reduced_frames)
+            # Genera un nome file unico usando timestamp
+            import time
+            blob_name = f"audio_{int(time.time())}_{os.path.basename(file_to_analyze)}"
             
-            # Calcoliamo la durata della porzione analizzabile
-            analyzable_duration = max_frames / frame_rate
+            # Carica il file su GCS
+            blob = bucket.blob(blob_name)
+            blob.upload_from_filename(file_to_analyze)
             
-            # Aggiorniamo il file da analizzare
-            os.remove(file_to_analyze)
-            file_to_analyze = reduced_file
+            # Ottieni l'URI GCS
+            gcs_uri = f"gs://{bucket_name}/{blob_name}"
+            print(f"✅ File caricato su: {gcs_uri}")
             
-            print(f"ℹ️ Analizzerò i primi {analyzable_duration:.1f} secondi dell'audio (limite dimensione API)")
-            size_note = f"primi {analyzable_duration:.1f} secondi analizzati (limite dimensione API)"
-        else:
-            size_note = f"file completo analizzato ({file_duration:.1f} secondi)"
-        
-        # Usa l'API Speech-to-Text
-        client = speech.SpeechClient()
-        
-        with open(file_to_analyze, 'rb') as audio_file:
-            content = audio_file.read()
+            # Usa l'API Speech con riferimento GCS
+            client = speech.SpeechClient()
             
-        audio = speech.RecognitionAudio(content=content)
-        
-        config = speech.RecognitionConfig(
-            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=frame_rate,
-            language_code=language_code,
-            audio_channel_count=1,
-            enable_automatic_punctuation=True,
-            enable_separate_recognition_per_channel=False,
-        )
-        
-        try:
-            print("⏳ Avvio trascrizione...")
+            audio = speech.RecognitionAudio(uri=gcs_uri)
             
-            # Determina se usare l'API sincrona o asincrona in base alla durata
-            if file_duration <= 60:  # Per file brevi, usiamo l'API sincrona (più veloce)
-                response = client.recognize(config=config, audio=audio)
-                results = response.results
-            else:  # Per file più lunghi, usiamo l'API asincrona
-                operation = client.long_running_recognize(config=config, audio=audio)
-                print("⏳ Elaborazione in corso, attendere...")
-                response = operation.result(timeout=600)
-                results = response.results
+            config = speech.RecognitionConfig(
+                encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+                sample_rate_hertz=frame_rate,
+                language_code=language_code,
+                audio_channel_count=1,
+                enable_automatic_punctuation=True,
+                enable_separate_recognition_per_channel=False,
+            )
+            
+            print("⏳ Avvio trascrizione asincrona via GCS...")
+            operation = client.long_running_recognize(config=config, audio=audio)
+            print("⏳ Elaborazione in corso, attendere (potrebbe richiedere tempo per file lunghi)...")
+            response = operation.result(timeout=1800)  # Timeout di 30 minuti per file molto lunghi
+            
+            # Dopo l'analisi, elimina il file da GCS
+            blob.delete()
+            print(f"✅ File temporaneo eliminato da GCS")
             
             # Elabora i risultati
-            if results:
-                transcript = " ".join([result.alternatives[0].transcript for result in results])
-                confidence = results[0].alternatives[0].confidence
+            if response.results:
+                transcript = " ".join([result.alternatives[0].transcript for result in response.results])
+                confidence = response.results[0].alternatives[0].confidence
                 
-                note_message = f"{conversion_note}, {size_note}"
+                note_message = f"{conversion_note}, file completo analizzato via GCS ({file_duration:.1f} secondi)"
                 
                 success_result = {
                     "transcript": transcript, 
@@ -255,21 +243,69 @@ def transcribe_audio(audio_path, language_code="it-IT"):
                     "note": note_message
                 }
             else:
-                note_message = f"{conversion_note}, {size_note}"
+                note_message = f"{conversion_note}, file completo analizzato via GCS ({file_duration:.1f} secondi)"
                 
                 success_result = {
                     "transcript": "", 
                     "confidence": 0, 
                     "note": f"Nessun risultato. {note_message}"
                 }
-        except Exception as api_error:
-            os.remove(file_to_analyze)
-            return {"error": f"Errore API Speech-to-Text: {str(api_error)}"}
+        else:
+            # Per file audio brevi, usa l'API diretta
+            client = speech.SpeechClient()
+            
+            with open(file_to_analyze, 'rb') as audio_file:
+                content = audio_file.read()
+                
+            audio = speech.RecognitionAudio(content=content)
+            
+            config = speech.RecognitionConfig(
+                encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+                sample_rate_hertz=frame_rate,
+                language_code=language_code,
+                audio_channel_count=1,
+                enable_automatic_punctuation=True,
+                enable_separate_recognition_per_channel=False,
+            )
+            
+            print("⏳ Avvio trascrizione diretta...")
+            response = client.recognize(config=config, audio=audio)
+            
+            # Elabora i risultati
+            if response.results:
+                transcript = " ".join([result.alternatives[0].transcript for result in response.results])
+                confidence = response.results[0].alternatives[0].confidence
+                
+                note_message = f"{conversion_note}, file completo analizzato ({file_duration:.1f} secondi)"
+                
+                success_result = {
+                    "transcript": transcript, 
+                    "confidence": confidence, 
+                    "note": note_message
+                }
+            else:
+                note_message = f"{conversion_note}, file completo analizzato ({file_duration:.1f} secondi)"
+                
+                success_result = {
+                    "transcript": "", 
+                    "confidence": 0, 
+                    "note": f"Nessun risultato. {note_message}"
+                }
         
-        # Elimina i file temporanei alla fine
+        # Elimina il file temporaneo locale
         os.remove(file_to_analyze)
         
         return success_result
+            
+    except FileNotFoundError:
+        print(f"❌ File audio non trovato: {audio_path}")
+        return {"error": "File non trovato"}
+    except Exception as e:
+        print(f"❌ Errore nell'analisi audio: {e}")
+        # Assicurati di eliminare il file temporaneo in caso di errore
+        if 'temp_file' in locals() and os.path.exists(temp_file):
+            os.remove(temp_file)
+        return {"error": str(e)}
             
     except FileNotFoundError:
         print(f"❌ File audio non trovato: {audio_path}")
