@@ -113,7 +113,7 @@ def analyze_face_expression(image_path):
         return {"error": str(e)}
 
 def transcribe_audio(audio_path, language_code="it-IT"):
-    """Trascrive l'audio e restituisce il testo, usando l'API asincrona per supportare file di qualsiasi lunghezza"""
+    """Trascrive l'audio e restituisce il testo, supportando file di qualsiasi lunghezza"""
     if audio_path.lower() == 'none':
         print("⏩ Analisi dell'audio saltata")
         return {"error": "Analisi saltata"}
@@ -130,9 +130,9 @@ def transcribe_audio(audio_path, language_code="it-IT"):
             n_frames = wav.getnframes()
             file_duration = n_frames / frame_rate
             
-            print(f"🔊 Audio di {file_duration:.1f} secondi")
+            print(f"🔊 Elaborazione audio di {file_duration:.1f} secondi (file completo)")
                 
-            # Legge tutti i frame
+            # Legge TUTTI i frame dell'audio (senza limitazioni)
             wav.setpos(0)
             audio_data = wav.readframes(n_frames)
         
@@ -141,7 +141,6 @@ def transcribe_audio(audio_path, language_code="it-IT"):
         
         if channels == 2:
             print("🔄 Conversione da stereo a mono in corso...")
-            # Converti da stereo a mono
             
             # Converte i bytes in un array numpy
             audio_array = np.frombuffer(audio_data, dtype=np.int16)
@@ -162,7 +161,7 @@ def transcribe_audio(audio_path, language_code="it-IT"):
             file_to_analyze = temp_file
             conversion_note = "Audio convertito da stereo a mono"
         else:
-            # Se è già mono, non serve conversione
+            # Se è già mono, non serve conversione ma creiamo comunque un file temporaneo per sicurezza
             with wave.open(temp_file, 'wb') as mono_wav:
                 mono_wav.setnchannels(1)  # Forza 1 canale per sicurezza
                 mono_wav.setsampwidth(sample_width)
@@ -174,39 +173,45 @@ def transcribe_audio(audio_path, language_code="it-IT"):
         
         # Verifica la dimensione del file temporaneo
         temp_size = os.path.getsize(file_to_analyze)
-        max_size = 100 * 1024 * 1024  # Aumentato a 100MB per supportare file più grandi
+        max_size = 100 * 1024 * 1024  # 100MB
         
         if temp_size > max_size:
             os.remove(temp_file)
             return {"error": f"File troppo grande ({temp_size/1024/1024:.1f}MB). Il limite è 100MB."}
         
-        # Trascrive il file temporaneo usando l'API asincrona
+        # Usa l'API Long Running per file audio lunghi
         client = speech.SpeechClient()
         
+        # Carica il file audio temporaneo
         with open(file_to_analyze, 'rb') as audio_file:
             content = audio_file.read()
             
         audio = speech.RecognitionAudio(content=content)
+        
+        # Configura il riconoscimento vocale
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=frame_rate,
             language_code=language_code,
-            audio_channel_count=1,  # Forza mono
+            audio_channel_count=1,  # Sempre mono
+            enable_automatic_punctuation=True,  # Attiva punteggiatura automatica
             enable_separate_recognition_per_channel=False
         )
         
         try:
-            # Utilizzo dell'API asincrona per supportare file audio più lunghi
-            print("🔄 Avvio trascrizione asincrona per file audio lungo...")
+            print("⏳ Avvio trascrizione dell'intero file audio...")
+            
+            # Usa ESCLUSIVAMENTE l'API asincrona per supportare file audio lunghi
             operation = client.long_running_recognize(config=config, audio=audio)
             
-            print("⏳ Attendere il completamento della trascrizione...")
-            response = operation.result()
+            print("⏳ Elaborazione in corso, attendere...")
+            response = operation.result(timeout=600)  # Timeout di 10 minuti per file molto lunghi
             
-            # Elabora la risposta
+            # Elabora i risultati
             if response.results:
                 transcript = " ".join([result.alternatives[0].transcript for result in response.results])
-                confidence = response.results[0].alternatives[0].confidence  # Prende la confidenza del primo risultato
+                confidence = response.results[0].alternatives[0].confidence
+                
                 success_result = {
                     "transcript": transcript, 
                     "confidence": confidence, 
@@ -216,10 +221,9 @@ def transcribe_audio(audio_path, language_code="it-IT"):
                 success_result = {
                     "transcript": "", 
                     "confidence": 0, 
-                    "note": f"Nessun risultato. {conversion_note}, file completo di {file_duration:.1f} secondi analizzato"
+                    "note": f"Nessun risultato. {conversion_note}, file completo analizzato"
                 }
         except Exception as api_error:
-            # Elimina il file temporaneo in caso di errore
             os.remove(file_to_analyze)
             return {"error": f"Errore API Speech-to-Text: {str(api_error)}"}
         
