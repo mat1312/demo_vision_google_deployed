@@ -114,8 +114,8 @@ def analyze_face_expression(image_path):
 
 def transcribe_audio(audio_path, language_code="it-IT"):
     """
-    Trascrive l'audio e restituisce il testo, supportando file di qualsiasi lunghezza 
-    utilizzando Google Cloud Storage per file lunghi
+    Trascrive l'audio e restituisce il testo, supportando file di qualsiasi lunghezza
+    usando Google Cloud Storage per file lunghi
     """
     if audio_path.lower() == 'none':
         print("⏩ Analisi dell'audio saltata")
@@ -124,8 +124,8 @@ def transcribe_audio(audio_path, language_code="it-IT"):
     try:
         if not audio_path.lower().endswith(('.wav')):
             return {"error": "Il file deve essere in formato WAV per l'analisi"}
-            
-        # Importa la libreria storage (aggiungila in cima al file se non è già presente)
+        
+        # Importa la libreria storage
         from google.cloud import storage
             
         # Apre il file WAV e legge le proprietà
@@ -136,164 +136,113 @@ def transcribe_audio(audio_path, language_code="it-IT"):
             n_frames = wav.getnframes()
             file_duration = n_frames / frame_rate
             
-            print(f"🔊 Elaborazione audio di {file_duration:.1f} secondi (file completo)")
-                
-            # Legge TUTTI i frame dell'audio
-            wav.setpos(0)
-            audio_data = wav.readframes(n_frames)
+        print(f"🔊 Elaborazione audio di {file_duration:.1f} secondi")
         
-        # Verifica se è necessario convertire da stereo a mono
+        # Converti da stereo a mono se necessario
         temp_file = f"temp_{os.path.basename(audio_path)}"
         
         if channels == 2:
             print("🔄 Conversione da stereo a mono in corso...")
             
-            # Converte i bytes in un array numpy
-            audio_array = np.frombuffer(audio_data, dtype=np.int16)
-            
-            # Rimodella l'array per avere 2 canali
-            audio_array = audio_array.reshape(-1, channels)
-            
-            # Calcola la media dei canali per ottenere mono
-            mono_array = audio_array.mean(axis=1).astype(np.int16)
-            
-            # Scrivi un nuovo file WAV mono
-            with wave.open(temp_file, 'wb') as mono_wav:
-                mono_wav.setnchannels(1)  # 1 canale (mono)
-                mono_wav.setsampwidth(sample_width)
-                mono_wav.setframerate(frame_rate)
-                mono_wav.writeframes(mono_array.tobytes())
+            with wave.open(audio_path, 'rb') as wav:
+                # Legge tutti i frame
+                wav.setpos(0)
+                audio_data = wav.readframes(n_frames)
                 
+                # Converte i bytes in un array numpy
+                audio_array = np.frombuffer(audio_data, dtype=np.int16)
+                
+                # Rimodella l'array per avere 2 canali
+                audio_array = audio_array.reshape(-1, channels)
+                
+                # Calcola la media dei canali per ottenere mono
+                mono_array = audio_array.mean(axis=1).astype(np.int16)
+                
+                # Scrivi un nuovo file WAV mono
+                with wave.open(temp_file, 'wb') as mono_wav:
+                    mono_wav.setnchannels(1)  # 1 canale (mono)
+                    mono_wav.setsampwidth(sample_width)
+                    mono_wav.setframerate(frame_rate)
+                    mono_wav.writeframes(mono_array.tobytes())
+                    
             file_to_analyze = temp_file
             conversion_note = "Audio convertito da stereo a mono"
         else:
-            # Se è già mono, non serve conversione ma creiamo comunque un file temporaneo per sicurezza
-            with wave.open(temp_file, 'wb') as mono_wav:
-                mono_wav.setnchannels(1)  # Forza 1 canale per sicurezza
-                mono_wav.setsampwidth(sample_width)
-                mono_wav.setframerate(frame_rate)
-                mono_wav.writeframes(audio_data)
-                
-            file_to_analyze = temp_file
+            # Se è già mono, utilizziamo direttamente il file originale
+            file_to_analyze = audio_path
             conversion_note = "Audio in formato mono"
         
-        # Per file audio lunghi, usiamo Google Cloud Storage
-        if file_duration > 60:  # Per file più lunghi di 1 minuto
-            print("🔄 File audio lungo rilevato, utilizzo Google Cloud Storage...")
-            
-            # Crea un client Storage
-            storage_client = storage.Client()
-            
-            # Genera un nome per il bucket temporaneo o usa uno esistente
-            # Nota: Dovresti avere un bucket già configurato o permessi per crearne uno
-            bucket_name = "audio_analysis_temp"
-            
-            # Verifica se il bucket esiste, altrimenti crealo
-            try:
-                bucket = storage_client.get_bucket(bucket_name)
-            except Exception:
-                print(f"⚠️ Bucket {bucket_name} non trovato, creazione in corso...")
-                bucket = storage_client.create_bucket(bucket_name)
-            
-            # Genera un nome file unico usando timestamp
-            import time
-            blob_name = f"audio_{int(time.time())}_{os.path.basename(file_to_analyze)}"
-            
-            # Carica il file su GCS
-            blob = bucket.blob(blob_name)
-            blob.upload_from_filename(file_to_analyze)
-            
-            # Ottieni l'URI GCS
-            gcs_uri = f"gs://{bucket_name}/{blob_name}"
-            print(f"✅ File caricato su: {gcs_uri}")
-            
-            # Usa l'API Speech con riferimento GCS
-            client = speech.SpeechClient()
-            
-            audio = speech.RecognitionAudio(uri=gcs_uri)
-            
-            config = speech.RecognitionConfig(
-                encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-                sample_rate_hertz=frame_rate,
-                language_code=language_code,
-                audio_channel_count=1,
-                enable_automatic_punctuation=True,
-                enable_separate_recognition_per_channel=False,
-            )
-            
-            print("⏳ Avvio trascrizione asincrona via GCS...")
-            operation = client.long_running_recognize(config=config, audio=audio)
-            print("⏳ Elaborazione in corso, attendere (potrebbe richiedere tempo per file lunghi)...")
-            response = operation.result(timeout=1800)  # Timeout di 30 minuti per file molto lunghi
-            
-            # Dopo l'analisi, elimina il file da GCS
-            blob.delete()
-            print(f"✅ File temporaneo eliminato da GCS")
-            
-            # Elabora i risultati
-            if response.results:
-                transcript = " ".join([result.alternatives[0].transcript for result in response.results])
-                confidence = response.results[0].alternatives[0].confidence
-                
-                note_message = f"{conversion_note}, file completo analizzato via GCS ({file_duration:.1f} secondi)"
-                
-                success_result = {
-                    "transcript": transcript, 
-                    "confidence": confidence, 
-                    "note": note_message
-                }
-            else:
-                note_message = f"{conversion_note}, file completo analizzato via GCS ({file_duration:.1f} secondi)"
-                
-                success_result = {
-                    "transcript": "", 
-                    "confidence": 0, 
-                    "note": f"Nessun risultato. {note_message}"
-                }
-        else:
-            # Per file audio brevi, usa l'API diretta
-            client = speech.SpeechClient()
-            
-            with open(file_to_analyze, 'rb') as audio_file:
-                content = audio_file.read()
-                
-            audio = speech.RecognitionAudio(content=content)
-            
-            config = speech.RecognitionConfig(
-                encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-                sample_rate_hertz=frame_rate,
-                language_code=language_code,
-                audio_channel_count=1,
-                enable_automatic_punctuation=True,
-                enable_separate_recognition_per_channel=False,
-            )
-            
-            print("⏳ Avvio trascrizione diretta...")
-            response = client.recognize(config=config, audio=audio)
-            
-            # Elabora i risultati
-            if response.results:
-                transcript = " ".join([result.alternatives[0].transcript for result in response.results])
-                confidence = response.results[0].alternatives[0].confidence
-                
-                note_message = f"{conversion_note}, file completo analizzato ({file_duration:.1f} secondi)"
-                
-                success_result = {
-                    "transcript": transcript, 
-                    "confidence": confidence, 
-                    "note": note_message
-                }
-            else:
-                note_message = f"{conversion_note}, file completo analizzato ({file_duration:.1f} secondi)"
-                
-                success_result = {
-                    "transcript": "", 
-                    "confidence": 0, 
-                    "note": f"Nessun risultato. {note_message}"
-                }
+        # Carica il file su Google Cloud Storage (GCS)
+        print("🔄 Caricamento del file su Google Cloud Storage...")
         
-        # Elimina il file temporaneo locale
-        os.remove(file_to_analyze)
+        # Crea un client Storage
+        storage_client = storage.Client()
+        
+        # Nome del bucket - assicurati che esista o che l'account di servizio possa crearlo
+        bucket_name = "audio_analysis_temp"
+        
+        # Verifica se il bucket esiste, altrimenti crealo
+        try:
+            bucket = storage_client.get_bucket(bucket_name)
+        except Exception:
+            print(f"⚠️ Bucket {bucket_name} non trovato, creazione in corso...")
+            bucket = storage_client.create_bucket(bucket_name)
+        
+        # Genera un nome file unico
+        import time
+        blob_name = f"audio_{int(time.time())}_{os.path.basename(file_to_analyze)}"
+        
+        # Carica il file su GCS
+        blob = bucket.blob(blob_name)
+        blob.upload_from_filename(file_to_analyze)
+        
+        # Ottieni l'URI GCS
+        gcs_uri = f"gs://{bucket_name}/{blob_name}"
+        print(f"✅ File caricato su: {gcs_uri}")
+        
+        # Utilizza l'API Speech con riferimento GCS
+        client = speech.SpeechClient()
+        
+        audio = speech.RecognitionAudio(uri=gcs_uri)
+        
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=frame_rate,
+            language_code=language_code,
+            audio_channel_count=1,
+            enable_automatic_punctuation=True,
+        )
+        
+        # Usa l'API asincrona per file lunghi
+        print("⏳ Avvio trascrizione con GCS...")
+        operation = client.long_running_recognize(config=config, audio=audio)
+        print("⏳ Elaborazione in corso, attendere...")
+        response = operation.result(timeout=900)  # Timeout di 15 minuti
+        
+        # Elimina il file da GCS
+        blob.delete()
+        print("✅ File temporaneo eliminato da GCS")
+        
+        # Elabora i risultati
+        if response.results:
+            transcript = " ".join([result.alternatives[0].transcript for result in response.results])
+            confidence = response.results[0].alternatives[0].confidence
+            
+            success_result = {
+                "transcript": transcript, 
+                "confidence": confidence, 
+                "note": f"{conversion_note}, file completo analizzato via GCS ({file_duration:.1f} secondi)"
+            }
+        else:
+            success_result = {
+                "transcript": "", 
+                "confidence": 0, 
+                "note": f"Nessun risultato. {conversion_note}, file completo analizzato via GCS"
+            }
+        
+        # Elimina il file temporaneo locale se è stato creato
+        if channels == 2 and os.path.exists(temp_file):
+            os.remove(temp_file)
         
         return success_result
             
@@ -302,37 +251,7 @@ def transcribe_audio(audio_path, language_code="it-IT"):
         return {"error": "File non trovato"}
     except Exception as e:
         print(f"❌ Errore nell'analisi audio: {e}")
-        # Assicurati di eliminare il file temporaneo in caso di errore
-        if 'temp_file' in locals() and os.path.exists(temp_file):
-            os.remove(temp_file)
-        return {"error": str(e)}
-            
-    except FileNotFoundError:
-        print(f"❌ File audio non trovato: {audio_path}")
-        return {"error": "File non trovato"}
-    except Exception as e:
-        print(f"❌ Errore nell'analisi audio: {e}")
-        # Assicurati di eliminare il file temporaneo in caso di errore
-        if 'temp_file' in locals() and os.path.exists(temp_file):
-            os.remove(temp_file)
-        return {"error": str(e)}
-            
-    except FileNotFoundError:
-        print(f"❌ File audio non trovato: {audio_path}")
-        return {"error": "File non trovato"}
-    except Exception as e:
-        print(f"❌ Errore nell'analisi audio: {e}")
-        # Assicurati di eliminare il file temporaneo in caso di errore
-        if 'temp_file' in locals() and os.path.exists(temp_file):
-            os.remove(temp_file)
-        return {"error": str(e)}
-            
-    except FileNotFoundError:
-        print(f"❌ File audio non trovato: {audio_path}")
-        return {"error": "File non trovato"}
-    except Exception as e:
-        print(f"❌ Errore nell'analisi audio: {e}")
-        # Assicurati di eliminare il file temporaneo in caso di errore
+        # Pulisci i file temporanei in caso di errore
         if 'temp_file' in locals() and os.path.exists(temp_file):
             os.remove(temp_file)
         return {"error": str(e)}
