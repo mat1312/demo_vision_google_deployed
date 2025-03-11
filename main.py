@@ -112,9 +112,8 @@ def analyze_face_expression(image_path):
         print(f"❌ Errore nell'analisi dell'immagine: {e}")
         return {"error": str(e)}
 
-### 🎤 3. Trascrizione Audio con limite di 45 secondi ###
 def transcribe_audio(audio_path, language_code="it-IT"):
-    """Trascrive l'audio e restituisce il testo, con limite di 45 secondi per rientrare nei limiti dell'API"""
+    """Trascrive l'audio e restituisce il testo, usando l'API asincrona per supportare file di qualsiasi lunghezza"""
     if audio_path.lower() == 'none':
         print("⏩ Analisi dell'audio saltata")
         return {"error": "Analisi saltata"}
@@ -122,9 +121,6 @@ def transcribe_audio(audio_path, language_code="it-IT"):
     try:
         if not audio_path.lower().endswith(('.wav')):
             return {"error": "Il file deve essere in formato WAV per l'analisi"}
-        
-        # Durata massima supportata dall'API sincrona (in secondi)
-        MAX_DURATION = 45
             
         # Apre il file WAV e legge le proprietà
         with wave.open(audio_path, 'rb') as wav:
@@ -132,20 +128,13 @@ def transcribe_audio(audio_path, language_code="it-IT"):
             sample_width = wav.getsampwidth()
             frame_rate = wav.getframerate()
             n_frames = wav.getnframes()
-            
-            # Calcola quanti frame analizzare (massimo 45 secondi)
-            frames_to_read = min(n_frames, frame_rate * MAX_DURATION)
             file_duration = n_frames / frame_rate
             
-            if file_duration > MAX_DURATION:
-                print(f"⚠️ L'audio è di {file_duration:.1f} secondi. Analizzo solo i primi {MAX_DURATION} secondi.")
-                duration_note = f"primi {MAX_DURATION} secondi"
-            else:
-                duration_note = "file completo"
+            print(f"🔊 Audio di {file_duration:.1f} secondi")
                 
-            # Legge i frame necessari
+            # Legge tutti i frame
             wav.setpos(0)
-            audio_data = wav.readframes(frames_to_read)
+            audio_data = wav.readframes(n_frames)
         
         # Verifica se è necessario convertire da stereo a mono
         temp_file = f"temp_{os.path.basename(audio_path)}"
@@ -185,13 +174,13 @@ def transcribe_audio(audio_path, language_code="it-IT"):
         
         # Verifica la dimensione del file temporaneo
         temp_size = os.path.getsize(file_to_analyze)
-        max_size = 10 * 1024 * 1024  # 10MB
+        max_size = 100 * 1024 * 1024  # Aumentato a 100MB per supportare file più grandi
         
         if temp_size > max_size:
             os.remove(temp_file)
-            return {"error": f"File troppo grande ({temp_size/1024/1024:.1f}MB) anche dopo la riduzione. Prova un file più corto."}
+            return {"error": f"File troppo grande ({temp_size/1024/1024:.1f}MB). Il limite è 100MB."}
         
-        # Trascrive il file temporaneo
+        # Trascrive il file temporaneo usando l'API asincrona
         client = speech.SpeechClient()
         
         with open(file_to_analyze, 'rb') as audio_file:
@@ -207,7 +196,12 @@ def transcribe_audio(audio_path, language_code="it-IT"):
         )
         
         try:
-            response = client.recognize(config=config, audio=audio)
+            # Utilizzo dell'API asincrona per supportare file audio più lunghi
+            print("🔄 Avvio trascrizione asincrona per file audio lungo...")
+            operation = client.long_running_recognize(config=config, audio=audio)
+            
+            print("⏳ Attendere il completamento della trascrizione...")
+            response = operation.result()
             
             # Elabora la risposta
             if response.results:
@@ -216,13 +210,13 @@ def transcribe_audio(audio_path, language_code="it-IT"):
                 success_result = {
                     "transcript": transcript, 
                     "confidence": confidence, 
-                    "note": f"{conversion_note}, {duration_note} analizzati"
+                    "note": f"{conversion_note}, file completo di {file_duration:.1f} secondi analizzato"
                 }
             else:
                 success_result = {
                     "transcript": "", 
                     "confidence": 0, 
-                    "note": f"Nessun risultato. {conversion_note}, {duration_note} analizzati"
+                    "note": f"Nessun risultato. {conversion_note}, file completo di {file_duration:.1f} secondi analizzato"
                 }
         except Exception as api_error:
             # Elimina il file temporaneo in caso di errore
